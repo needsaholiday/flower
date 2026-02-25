@@ -7,12 +7,14 @@ import {
   useNodesState,
   useEdgesState,
   type NodeTypes,
+  type Edge,
   type Node,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import PipelineNodeComponent from './PipelineNode';
 import type { PipelineNodeData } from './PipelineNode';
 import type { PipelineGraph as PipelineGraphType } from '../types';
+import type { ComponentMetrics } from '../types';
 import type { MetricsResult } from '../hooks/useBenthosMetrics';
 import { layoutGraph } from '../utils/layoutGraph';
 
@@ -20,10 +22,116 @@ const nodeTypes: NodeTypes = {
   pipelineNode: PipelineNodeComponent,
 };
 
+/** Min / max stroke width for traffic-scaled edges */
+const MIN_EDGE_WIDTH = 1.5;
+const MAX_EDGE_WIDTH = 8;
+/** Extra width added when an edge carries more messages than input_received */
+const OVERFLOW_EXTRA_WIDTH = 2;
+
 interface PipelineGraphProps {
   graph: PipelineGraphType;
   metrics?: MetricsResult;
   onNodeClick?: (nodeId: string) => void;
+}
+
+/**
+ * Resolve ComponentMetrics for a node (by metricPath, then by componentLabel).
+ */
+function resolveNodeMetrics(
+  nodeData: PipelineNodeData,
+  metrics: MetricsResult,
+): ComponentMetrics | undefined {
+  return (
+    metrics.byPath.get(nodeData.metricPath) ??
+    (nodeData.componentLabel ? metrics.byLabel.get(nodeData.componentLabel) : undefined)
+  );
+}
+
+/**
+ * Determine the traffic volume for an edge.
+ * Uses the target node's `received` count first, falling back to the source's `sent`,
+ * then to the target's `sent` (covers output nodes which only expose `output_sent`).
+ * Returns undefined when no metrics are available for the edge.
+ */
+function edgeTraffic(
+  sourceMetrics: ComponentMetrics | undefined,
+  targetMetrics: ComponentMetrics | undefined,
+): number | undefined {
+  return targetMetrics?.received ?? sourceMetrics?.sent ?? targetMetrics?.sent;
+}
+
+/**
+ * Build dynamically-styled edges based on traffic volume.
+ *
+ * – Width is proportional to the edge's traffic relative to the max observed traffic
+ *   (typically the pipeline input's received count).
+ * – Zero-traffic edges are highlighted with a dashed orange/red stroke.
+ * – Edges carrying *more* messages than the pipeline's input_received get extra width
+ *   (message splitting / fan-out).
+ */
+function buildStyledEdges(
+  edges: Edge[],
+  nodeMetricsMap: Map<string, ComponentMetrics>,
+  maxInputReceived: number,
+): Edge[] {
+  // Collect per-edge traffic values so we can compute the range
+  const edgeTrafficValues: (number | undefined)[] = edges.map((edge) => {
+    const srcM = nodeMetricsMap.get(edge.source);
+    const tgtM = nodeMetricsMap.get(edge.target);
+    return edgeTraffic(srcM, tgtM);
+  });
+
+  const maxTraffic = Math.max(
+    maxInputReceived,
+    ...edgeTrafficValues.filter((v): v is number => v !== undefined),
+    1, // avoid division by zero
+  );
+
+  return edges.map((edge, i) => {
+    const traffic = edgeTrafficValues[i];
+
+    // No metrics available – keep default style
+    if (traffic === undefined) {
+      return edge;
+    }
+
+    // Zero traffic – highlighted edge (filtered everything)
+    if (traffic === 0) {
+      return {
+        ...edge,
+        animated: false,
+        style: {
+          stroke: '#f97316', // orange-500
+          strokeWidth: MIN_EDGE_WIDTH,
+          strokeDasharray: '6 3',
+          opacity: 0.85,
+        },
+        label: '0',
+        labelStyle: { fill: '#f97316', fontSize: 11, fontWeight: 600 },
+        labelBgStyle: { fill: '#1e1e2e', fillOpacity: 0.8 },
+      };
+    }
+
+    // Proportional width
+    const ratio = traffic / maxTraffic;
+    let strokeWidth = MIN_EDGE_WIDTH + ratio * (MAX_EDGE_WIDTH - MIN_EDGE_WIDTH);
+
+    // Overflow: edge carries more than the pipeline input received
+    const isOverflow = maxInputReceived > 0 && traffic > maxInputReceived;
+    if (isOverflow) {
+      strokeWidth = MAX_EDGE_WIDTH + OVERFLOW_EXTRA_WIDTH;
+    }
+
+    return {
+      ...edge,
+      animated: true,
+      style: {
+        stroke: isOverflow ? '#38bdf8' : '#6b7280', // sky-400 for overflow, gray otherwise
+        strokeWidth,
+        transition: 'stroke-width 0.4s ease, stroke 0.4s ease',
+      },
+    };
+  });
 }
 
 export default function PipelineGraphView({ graph, metrics, onNodeClick }: PipelineGraphProps) {
@@ -32,26 +140,51 @@ export default function PipelineGraphView({ graph, metrics, onNodeClick }: Pipel
     [graph],
   );
 
-  // Inject metrics into node data, matching by path first then by component label
+  // Build a map: nodeId → ComponentMetrics (used for both nodes and edges)
+  const nodeMetricsMap = useMemo(() => {
+    const map = new Map<string, ComponentMetrics>();
+    if (!metrics) return map;
+    for (const node of layoutedNodes) {
+      const nd = node.data as unknown as PipelineNodeData;
+      const m = resolveNodeMetrics(nd, metrics);
+      if (m) map.set(node.id, m);
+    }
+    return map;
+  }, [layoutedNodes, metrics]);
+
+  // Inject metrics into node data
   const nodesWithMetrics = useMemo(() => {
     if (!metrics) return layoutedNodes;
     return layoutedNodes.map((node) => {
-      const nodeData = node.data as unknown as PipelineNodeData;
-      const nodeMetrics =
-        metrics.byPath.get(nodeData.metricPath) ??
-        (nodeData.componentLabel ? metrics.byLabel.get(nodeData.componentLabel) : undefined);
-      if (nodeMetrics) {
-        return {
-          ...node,
-          data: { ...node.data, metrics: nodeMetrics },
-        };
+      const m = nodeMetricsMap.get(node.id);
+      if (m) {
+        return { ...node, data: { ...node.data, metrics: m } };
       }
       return node;
     });
-  }, [layoutedNodes, metrics]);
+  }, [layoutedNodes, nodeMetricsMap, metrics]);
+
+  // Find the pipeline's input_received (max received across input nodes)
+  const maxInputReceived = useMemo(() => {
+    let max = 0;
+    for (const node of layoutedNodes) {
+      const nd = node.data as unknown as PipelineNodeData;
+      if (nd.nodeType === 'input') {
+        const m = nodeMetricsMap.get(node.id);
+        if (m?.received !== undefined && m.received > max) max = m.received;
+      }
+    }
+    return max;
+  }, [layoutedNodes, nodeMetricsMap]);
+
+  // Style edges based on traffic volume
+  const styledEdges = useMemo(
+    () => (metrics ? buildStyledEdges(layoutedEdges, nodeMetricsMap, maxInputReceived) : layoutedEdges),
+    [layoutedEdges, nodeMetricsMap, maxInputReceived, metrics],
+  );
 
   const [, , onNodesChange] = useNodesState(nodesWithMetrics);
-  const [, , onEdgesChange] = useEdgesState(layoutedEdges);
+  const [, , onEdgesChange] = useEdgesState(styledEdges);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     onNodeClick?.(node.id);
@@ -61,7 +194,7 @@ export default function PipelineGraphView({ graph, metrics, onNodeClick }: Pipel
     <div style={containerStyle}>
       <ReactFlow
         nodes={nodesWithMetrics}
-        edges={layoutedEdges}
+        edges={styledEdges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}

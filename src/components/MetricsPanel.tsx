@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import yaml from 'js-yaml';
 import type { ComponentMetrics } from '../types';
 import type { PipelineNodeData } from './PipelineNode';
 import { formatCount, formatLatency } from '../utils/metricsParser';
@@ -97,7 +98,7 @@ export default function MetricsPanel({ nodeData, metrics, onClose }: MetricsPane
       {nodeData.config && (
         <div style={sectionStyle}>
           <h4 style={sectionTitleStyle}>Configuration</h4>
-          <pre style={preStyle}>{JSON.stringify(nodeData.config, null, 2)}</pre>
+          <pre style={preStyle}>{yaml.dump(nodeData.config, { indent: 2, lineWidth: -1, noRefs: true })}</pre>
         </div>
       )}
     </div>
