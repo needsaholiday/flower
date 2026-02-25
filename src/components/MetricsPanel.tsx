@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import yaml from 'js-yaml';
 import type { ComponentMetrics } from '../types';
 import type { PipelineNodeData } from './PipelineNode';
-import { formatCount, formatLatency } from '../utils/metricsParser';
+import { formatCount, formatLatency, formatRate } from '../utils/metricsParser';
 
 interface MetricsPanelProps {
   nodeData: PipelineNodeData | null;
@@ -43,14 +43,27 @@ export default function MetricsPanel({ nodeData, metrics, onClose }: MetricsPane
             {metrics.received !== undefined && (
               <MetricRow label="Received" value={formatCount(metrics.received)} />
             )}
+            {metrics.receivedRate !== undefined && (
+              <MetricRow label="Receive Rate" value={formatRate(metrics.receivedRate)} color="#89b4fa" />
+            )}
             {metrics.sent !== undefined && (
               <MetricRow label="Sent" value={formatCount(metrics.sent)} />
+            )}
+            {metrics.sentRate !== undefined && (
+              <MetricRow label="Send Rate" value={formatRate(metrics.sentRate)} color="#89b4fa" />
             )}
             {metrics.error !== undefined && (
               <MetricRow
                 label="Errors"
                 value={formatCount(metrics.error)}
                 color={(metrics.error ?? 0) > 0 ? '#ef4444' : undefined}
+              />
+            )}
+            {metrics.errorRate !== undefined && (metrics.errorRate ?? 0) > 0 && (
+              <MetricRow
+                label="Error Rate"
+                value={formatRate(metrics.errorRate)}
+                color="#ef4444"
               />
             )}
             {metrics.latencyNs !== undefined && (

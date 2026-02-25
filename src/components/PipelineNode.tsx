@@ -1,7 +1,7 @@
 import { memo, type CSSProperties } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { ComponentMetrics } from '../types';
-import { formatCount, formatLatency } from '../utils/metricsParser';
+import { formatCount, formatLatency, formatRate } from '../utils/metricsParser';
 
 export interface PipelineNodeData {
   label: string;
@@ -42,6 +42,11 @@ function MetricsBadge({ metrics, nodeType }: { metrics?: ComponentMetrics; nodeT
           ↓ {formatCount(metrics.received)}
         </span>
       )}
+      {nodeType === 'input' && metrics.receivedRate !== undefined && (
+        <span style={rateBadgeStyle} title="Receive rate">
+          ⚡ {formatRate(metrics.receivedRate)}
+        </span>
+      )}
       {nodeType === 'processor' && (
         <>
           <span style={badgeStyle} title="Received → Sent">
@@ -49,9 +54,19 @@ function MetricsBadge({ metrics, nodeType }: { metrics?: ComponentMetrics; nodeT
           </span>
         </>
       )}
+      {nodeType === 'processor' && metrics.sentRate !== undefined && (
+        <span style={rateBadgeStyle} title="Throughput rate">
+          ⚡ {formatRate(metrics.sentRate)}
+        </span>
+      )}
       {nodeType === 'output' && (
         <span style={badgeStyle} title="Sent">
           ↑ {formatCount(metrics.sent)}
+        </span>
+      )}
+      {nodeType === 'output' && metrics.sentRate !== undefined && (
+        <span style={rateBadgeStyle} title="Send rate">
+          ⚡ {formatRate(metrics.sentRate)}
         </span>
       )}
       {nodeType === 'cache' && (
@@ -180,5 +195,11 @@ const badgeContainerStyle: CSSProperties = {
 const badgeStyle: CSSProperties = {
   fontSize: 11,
   color: '#a6adc8',
+  fontFamily: "'JetBrains Mono', monospace",
+};
+
+const rateBadgeStyle: CSSProperties = {
+  fontSize: 11,
+  color: '#89b4fa',
   fontFamily: "'JetBrains Mono', monospace",
 };

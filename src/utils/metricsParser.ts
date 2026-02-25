@@ -147,3 +147,14 @@ export function formatCount(n: number | undefined): string {
   if (n < 1_000_000) return `${(n / 1_000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
+
+/** Format a rate (per second) to human readable */
+export function formatRate(n: number | undefined): string {
+  if (n === undefined) return '-';
+  if (n < 0.01) return '0/s';
+  if (n < 1) return `${n.toFixed(2)}/s`;
+  if (n < 10) return `${n.toFixed(1)}/s`;
+  if (n < 1_000) return `${n.toFixed(0)}/s`;
+  if (n < 1_000_000) return `${(n / 1_000).toFixed(1)}k/s`;
+  return `${(n / 1_000_000).toFixed(1)}M/s`;
+}

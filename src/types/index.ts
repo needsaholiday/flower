@@ -24,6 +24,12 @@ export interface ComponentMetrics {
   batchSent?: number;
   batchReceived?: number;
   notFound?: number;
+  /** Messages received per second (computed from counter deltas) */
+  receivedRate?: number;
+  /** Messages sent per second (computed from counter deltas) */
+  sentRate?: number;
+  /** Errors per second (computed from counter deltas) */
+  errorRate?: number;
 }
 
 /** A node in the pipeline DAG */
