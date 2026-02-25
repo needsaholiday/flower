@@ -1,0 +1,7 @@
+[
+    {
+        "name": "sample-pipeline",
+        "url": "http://connect:4195",
+        "description": "Sample event generator pipeline for local testing"
+    }
+]

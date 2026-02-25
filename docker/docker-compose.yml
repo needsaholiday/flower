@@ -1,0 +1,28 @@
+# Example Docker Compose for Flower + Redpanda Connect
+#
+# Usage (from repo root):
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Then open http://localhost:8080 in your browser.
+
+services:
+  # Redpanda Connect pipeline (sample event generator)
+  connect:
+    image: docker.redpanda.com/redpandadata/connect:4.74.0
+    command: -c /connect.yaml
+    volumes:
+      - ../sample-connect.yaml:/connect.yaml:ro
+    ports:
+      - "4195:4195"
+
+  # Flower UI — proxies to the Connect instance above
+  flower:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./targets.docker.json:/config/targets.json:ro
+    depends_on:
+      - connect

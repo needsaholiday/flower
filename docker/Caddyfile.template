@@ -1,0 +1,18 @@
+:8080 {
+	root * /srv
+	encode gzip
+
+	handle /targets.json {
+		root * /config
+		file_server
+		header Cache-Control "no-cache"
+	}
+
+	# PROXY_ROUTES_PLACEHOLDER - replaced by entrypoint.sh at startup
+	{{PROXY_ROUTES}}
+
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+}

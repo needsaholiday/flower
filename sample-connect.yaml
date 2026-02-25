@@ -1,0 +1,91 @@
+# Sample Redpanda Connect config for testing rp-ui
+# Run with: docker run --rm -p 4195:4195 -v $(pwd)/sample-connect.yaml:/connect.yaml docker.redpanda.com/redpandadata/connect:4.63.0 -c /connect.yaml
+#
+# Or locally: rpk connect run -c sample-connect.yaml
+
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+  root_path: /benthos
+  debug_endpoints: true
+  cors:
+    enabled: true
+    allowed_origins:
+      - '*'
+
+input:
+  label: event_generator
+  generate:
+    interval: 500ms
+    count: 0
+    mapping: |
+      let categories = ["electronics", "clothing", "food", "books", "toys"]
+      let actions = ["purchase", "view", "add_to_cart", "remove_from_cart", "wishlist"]
+
+      root.event_id = uuid_v4()
+      root.timestamp = now()
+      root.user_id = "user_%d".format(random_int(min: 1, max: 500))
+      root.action = $actions.index(random_int(min: 0, max: 4))
+      root.category = $categories.index(random_int(min: 0, max: 4))
+      root.amount = (random_int(min: 100, max: 99999).number() / 100).ceil()
+      root.metadata.source = "sample-generator"
+      root.metadata.version = "1.0"
+
+pipeline:
+  processors:
+    - label: validate_event
+      mapping: |
+        root = this
+        root.validated = true
+        root.processing_step = "validation"
+
+    - label: enrich_data
+      mapping: |
+        root = this
+        root.enriched_at = now()
+        root.processing_step = "enrichment"
+        root.user_segment = if this.amount > 500 { "high_value" } else if this.amount > 100 { "medium_value" } else { "low_value" }
+
+    - label: filter_and_transform
+      mapping: |
+        root = this
+        root.processing_step = "transform"
+        root.display_amount = "$%s".format(this.amount)
+        root.event_key = "%s_%s_%s".format(this.user_id, this.action, this.category)
+
+    - label: slow_processor
+      sleep:
+        duration: 10ms
+
+    - label: log_sample
+      log:
+        level: DEBUG
+        message: '${! json("event_key") } - ${! json("action") } - ${! json("display_amount") }'
+
+cache_resources:
+  - label: event_cache
+    memory:
+      default_ttl: 60s
+
+output:
+  label: event_sink
+  switch:
+    cases:
+      - check: this.action == "purchase"
+        output:
+          label: purchases_log
+          drop: {}
+
+      - output:
+          label: other_events_log
+          drop: {}
+
+metrics:
+  prometheus:
+    add_process_metrics: true
+    add_go_metrics: true
+
+logger:
+  level: INFO
+  format: logfmt
+  add_timestamp: true
