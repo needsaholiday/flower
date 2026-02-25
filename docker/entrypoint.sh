@@ -27,13 +27,21 @@ for row in $(jq -r '.[] | @base64' "$CONFIG_FILE"); do
 
   echo "  -> Registering proxy route: /api/proxy/$NAME -> $URL"
 
+  # Only add TLS transport config for HTTPS upstreams
+  TRANSPORT_BLOCK=""
+  case "$URL" in
+    https://*)
+      TRANSPORT_BLOCK="
+			transport http {
+				tls_insecure_skip_verify
+			}"
+      ;;
+  esac
+
   PROXY_ROUTES="${PROXY_ROUTES}
 	handle_path /api/proxy/${NAME}/* {
 		reverse_proxy ${URL} {
-			header_up Host {upstream_hostport}
-			transport http {
-				tls_insecure_skip_verify
-			}
+			header_up Host {upstream_hostport}${TRANSPORT_BLOCK}
 		}
 	}
 "
