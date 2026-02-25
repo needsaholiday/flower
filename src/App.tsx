@@ -31,7 +31,7 @@ export default function App() {
 
   const { data: targets, isLoading: targetsLoading, error: targetsError } = useTargets();
   const { data: graph, isLoading: configLoading, error: configError } = useBenthosConfig(selectedTarget);
-  const { data: metrics } = useBenthosMetrics(selectedTarget);
+  const { data: metrics, history: metricsHistory } = useBenthosMetrics(selectedTarget);
   const { data: runtimeSnapshots } = useRuntimeMetrics(selectedTarget);
 
   const handleTargetSelect = useCallback((name: string) => {
@@ -40,7 +40,7 @@ export default function App() {
   }, []);
 
   const handleNodeClick = useCallback((nodeId: string) => {
-    setSelectedNode(nodeId);
+    setSelectedNode((prev) => prev === nodeId ? null : nodeId);
   }, []);
 
   const handleClosePanel = useCallback(() => {
@@ -105,6 +105,8 @@ export default function App() {
                 <PipelineGraphView
                   graph={graph}
                   metrics={metrics}
+                  metricsHistory={metricsHistory}
+                  selectedNodeId={selectedNode}
                   onNodeClick={handleNodeClick}
                 />
               </ReactFlowProvider>

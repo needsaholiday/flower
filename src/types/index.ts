@@ -32,6 +32,18 @@ export interface ComponentMetrics {
   errorRate?: number;
 }
 
+/** A single time-series data point for a component's metrics */
+export interface MetricsTimePoint {
+  timestamp: number;
+  received?: number;
+  sent?: number;
+  error?: number;
+  latencyNs?: number;
+  receivedRate?: number;
+  sentRate?: number;
+  errorRate?: number;
+}
+
 /** A node in the pipeline DAG */
 export interface PipelineNode {
   id: string;

@@ -14,8 +14,8 @@ import '@xyflow/react/dist/style.css';
 import PipelineNodeComponent from './PipelineNode';
 import type { PipelineNodeData } from './PipelineNode';
 import type { PipelineGraph as PipelineGraphType } from '../types';
-import type { ComponentMetrics } from '../types';
-import type { MetricsResult } from '../hooks/useBenthosMetrics';
+import type { ComponentMetrics, MetricsTimePoint } from '../types';
+import type { MetricsResult, MetricsHistory } from '../hooks/useBenthosMetrics';
 import { layoutGraph } from '../utils/layoutGraph';
 
 const nodeTypes: NodeTypes = {
@@ -31,6 +31,8 @@ const OVERFLOW_EXTRA_WIDTH = 2;
 interface PipelineGraphProps {
   graph: PipelineGraphType;
   metrics?: MetricsResult;
+  metricsHistory?: MetricsHistory;
+  selectedNodeId?: string | null;
   onNodeClick?: (nodeId: string) => void;
 }
 
@@ -134,10 +136,23 @@ function buildStyledEdges(
   });
 }
 
-export default function PipelineGraphView({ graph, metrics, onNodeClick }: PipelineGraphProps) {
+/**
+ * Resolve the metrics history for a given node from the MetricsHistory maps.
+ */
+function resolveNodeHistory(
+  nodeData: PipelineNodeData,
+  history: MetricsHistory,
+): MetricsTimePoint[] | undefined {
+  return (
+    history.byPath.get(nodeData.metricPath) ??
+    (nodeData.componentLabel ? history.byLabel.get(nodeData.componentLabel) : undefined)
+  );
+}
+
+export default function PipelineGraphView({ graph, metrics, metricsHistory, selectedNodeId, onNodeClick }: PipelineGraphProps) {
   const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
-    () => layoutGraph(graph),
-    [graph],
+    () => layoutGraph(graph, selectedNodeId),
+    [graph, selectedNodeId],
   );
 
   // Build a map: nodeId → ComponentMetrics (used for both nodes and edges)
@@ -152,17 +167,25 @@ export default function PipelineGraphView({ graph, metrics, onNodeClick }: Pipel
     return map;
   }, [layoutedNodes, metrics]);
 
-  // Inject metrics into node data
+  // Inject metrics, selected state, and history into node data
   const nodesWithMetrics = useMemo(() => {
-    if (!metrics) return layoutedNodes;
     return layoutedNodes.map((node) => {
-      const m = nodeMetricsMap.get(node.id);
-      if (m) {
-        return { ...node, data: { ...node.data, metrics: m } };
-      }
-      return node;
+      const m = metrics ? nodeMetricsMap.get(node.id) : undefined;
+      const nd = node.data as unknown as PipelineNodeData;
+      const isSelected = node.id === selectedNodeId;
+      const history = metricsHistory ? resolveNodeHistory(nd, metricsHistory) : undefined;
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          ...(m ? { metrics: m } : {}),
+          selected: isSelected,
+          metricsHistory: history,
+        },
+      };
     });
-  }, [layoutedNodes, nodeMetricsMap, metrics]);
+  }, [layoutedNodes, nodeMetricsMap, metrics, selectedNodeId, metricsHistory]);
 
   // Find the pipeline's input_received (max received across input nodes)
   const maxInputReceived = useMemo(() => {

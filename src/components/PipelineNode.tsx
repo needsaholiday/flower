@@ -1,7 +1,8 @@
-import { memo, type CSSProperties } from 'react';
+import { memo, useMemo, type CSSProperties } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import type { ComponentMetrics } from '../types';
+import type { ComponentMetrics, MetricsTimePoint } from '../types';
 import { formatCount, formatLatency, formatRate } from '../utils/metricsParser';
+import Sparkline from './Sparkline';
 
 export interface PipelineNodeData {
   label: string;
@@ -11,6 +12,10 @@ export interface PipelineNodeData {
   componentLabel?: string;
   metrics?: ComponentMetrics;
   config?: Record<string, unknown>;
+  /** Whether this node is currently selected/expanded */
+  selected?: boolean;
+  /** Historical time-series data for this node */
+  metricsHistory?: MetricsTimePoint[];
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -99,13 +104,129 @@ function MetricsBadge({ metrics, nodeType }: { metrics?: ComponentMetrics; nodeT
   );
 }
 
+/** Mini chart shown in the expanded node */
+function MiniChart({
+  title,
+  data,
+  color,
+  currentValue,
+}: {
+  title: string;
+  data: number[];
+  color: string;
+  currentValue: string;
+}) {
+  return (
+    <div style={miniChartContainerStyle}>
+      <div style={miniChartHeaderStyle}>
+        <span style={miniChartTitleStyle}>{title}</span>
+        <span style={{ ...miniChartValueStyle, color }}>{currentValue}</span>
+      </div>
+      <Sparkline data={data} width={310} height={44} color={color} fillColor={color} />
+    </div>
+  );
+}
+
+function ExpandedMetrics({
+  metrics,
+  history,
+  nodeType,
+}: {
+  metrics?: ComponentMetrics;
+  history: MetricsTimePoint[];
+  nodeType: string;
+}) {
+  // Extract time-series arrays for each chart
+  const rateData = useMemo(() => {
+    if (nodeType === 'input') {
+      return history.map((p) => p.receivedRate ?? 0);
+    }
+    return history.map((p) => p.sentRate ?? 0);
+  }, [history, nodeType]);
+
+  const inputOutputData = useMemo(() => ({
+    received: history.map((p) => p.received ?? 0),
+    sent: history.map((p) => p.sent ?? 0),
+  }), [history]);
+
+  const latencyData = useMemo(() =>
+    history.map((p) => (p.latencyNs ?? 0) / 1_000_000), // convert to ms
+  [history]);
+
+  const rateLabel = nodeType === 'input' ? 'Receive Rate' : 'Send Rate';
+  const currentRate = nodeType === 'input'
+    ? formatRate(metrics?.receivedRate)
+    : formatRate(metrics?.sentRate);
+
+  return (
+    <div style={expandedContainerStyle}>
+      <MiniChart
+        title={rateLabel}
+        data={rateData}
+        color="#89b4fa"
+        currentValue={currentRate}
+      />
+      {nodeType === 'processor' ? (
+        <>
+          <MiniChart
+            title="Received"
+            data={inputOutputData.received}
+            color="#a6e3a1"
+            currentValue={formatCount(metrics?.received)}
+          />
+          <MiniChart
+            title="Sent"
+            data={inputOutputData.sent}
+            color="#f9e2af"
+            currentValue={formatCount(metrics?.sent)}
+          />
+        </>
+      ) : nodeType === 'input' ? (
+        <MiniChart
+          title="Received"
+          data={inputOutputData.received}
+          color="#a6e3a1"
+          currentValue={formatCount(metrics?.received)}
+        />
+      ) : (
+        <MiniChart
+          title="Sent"
+          data={inputOutputData.sent}
+          color="#f9e2af"
+          currentValue={formatCount(metrics?.sent)}
+        />
+      )}
+      <MiniChart
+        title="Latency (ms)"
+        data={latencyData}
+        color="#cba6f7"
+        currentValue={formatLatency(metrics?.latencyNs)}
+      />
+      {(metrics?.error ?? 0) > 0 && (
+        <MiniChart
+          title="Errors"
+          data={history.map((p) => p.error ?? 0)}
+          color="#f38ba8"
+          currentValue={formatCount(metrics?.error)}
+        />
+      )}
+    </div>
+  );
+}
+
 function PipelineNodeComponent({ data }: NodeProps) {
   const nodeData = data as unknown as PipelineNodeData;
   const color = TYPE_COLORS[nodeData.nodeType] ?? '#6b7280';
   const icon = TYPE_ICONS[nodeData.nodeType] ?? '📦';
+  const isExpanded = !!nodeData.selected;
 
   return (
-    <div style={{ ...nodeStyle, borderColor: color }}>
+    <div style={{
+      ...nodeStyle,
+      borderColor: color,
+      ...(isExpanded ? expandedNodeStyle : {}),
+      ...(nodeData.selected ? { boxShadow: `0 0 20px ${color}44, 0 4px 12px rgba(0,0,0,0.3)` } : {}),
+    }}>
       {nodeData.nodeType !== 'input' && (
         <Handle type="target" position={Position.Top} style={handleStyle} />
       )}
@@ -121,6 +242,14 @@ function PipelineNodeComponent({ data }: NodeProps) {
       <div style={componentTypeStyle}>{nodeData.componentType}</div>
 
       <MetricsBadge metrics={nodeData.metrics} nodeType={nodeData.nodeType} />
+
+      {isExpanded && (
+        <ExpandedMetrics
+          metrics={nodeData.metrics}
+          history={nodeData.metricsHistory ?? []}
+          nodeType={nodeData.nodeType}
+        />
+      )}
 
       {nodeData.nodeType !== 'cache' && nodeData.nodeType !== 'rate_limit' && (
         <Handle type="source" position={Position.Bottom} style={handleStyle} />
@@ -143,6 +272,12 @@ const nodeStyle: CSSProperties = {
   fontFamily: "'Inter', system-ui, sans-serif",
   color: '#cdd6f4',
   boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+  transition: 'all 0.3s ease',
+};
+
+const expandedNodeStyle: CSSProperties = {
+  minWidth: 350,
+  maxWidth: 380,
 };
 
 const handleStyle: CSSProperties = {
@@ -201,5 +336,42 @@ const badgeStyle: CSSProperties = {
 const rateBadgeStyle: CSSProperties = {
   fontSize: 11,
   color: '#89b4fa',
+  fontFamily: "'JetBrains Mono', monospace",
+};
+
+const expandedContainerStyle: CSSProperties = {
+  marginTop: 10,
+  borderTop: '1px solid #313244',
+  paddingTop: 10,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+};
+
+const miniChartContainerStyle: CSSProperties = {
+  background: '#11111b',
+  borderRadius: 6,
+  padding: '6px 8px',
+  border: '1px solid #313244',
+};
+
+const miniChartHeaderStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'baseline',
+  marginBottom: 4,
+};
+
+const miniChartTitleStyle: CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: '#6c7086',
+  textTransform: 'uppercase',
+  letterSpacing: '0.5px',
+};
+
+const miniChartValueStyle: CSSProperties = {
+  fontSize: 12,
+  fontWeight: 700,
   fontFamily: "'JetBrains Mono', monospace",
 };
