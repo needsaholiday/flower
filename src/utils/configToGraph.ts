@@ -221,5 +221,95 @@ export function configToGraph(yamlStr: string): PipelineGraph {
     }
   }
 
+  // --- Connect cache & rate_limit resources to the nodes that reference them ---
+  connectResources(nodes, edges);
+
   return { nodes, edges };
+}
+
+/**
+ * Build lookup maps for cache and rate_limit resource nodes by their label,
+ * then scan all processor/output node configs to find references and create edges.
+ *
+ * Cache references appear as e.g. `dedupe: { cache: "mem" }` or `cache: "mem"` at any depth.
+ * Rate-limit references appear as e.g. `http_client: { rate_limit: "foo" }`.
+ */
+function connectResources(
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+): void {
+  // Build label → nodeId lookup for caches and rate limits
+  const cacheNodeByLabel = new Map<string, string>();
+  const rateLimitNodeByLabel = new Map<string, string>();
+  for (const nd of nodes) {
+    if (nd.type === 'cache') cacheNodeByLabel.set(nd.label, nd.id);
+    if (nd.type === 'rate_limit') rateLimitNodeByLabel.set(nd.label, nd.id);
+  }
+  if (cacheNodeByLabel.size === 0 && rateLimitNodeByLabel.size === 0) return;
+
+  // Scan each non-resource node's config for cache / rate_limit references
+  for (const nd of nodes) {
+    if (nd.type === 'cache' || nd.type === 'rate_limit' || !nd.config) continue;
+
+    const refs = extractResourceRefs(nd.config);
+
+    for (const cacheName of refs.caches) {
+      const cacheId = cacheNodeByLabel.get(cacheName);
+      if (cacheId) {
+        const edgeId = `e-${nd.id}-${cacheId}`;
+        if (!edges.some((e) => e.id === edgeId)) {
+          edges.push({ id: edgeId, source: nd.id, target: cacheId });
+        }
+      }
+    }
+
+    for (const rlName of refs.rateLimits) {
+      const rlId = rateLimitNodeByLabel.get(rlName);
+      if (rlId) {
+        const edgeId = `e-${nd.id}-${rlId}`;
+        if (!edges.some((e) => e.id === edgeId)) {
+          edges.push({ id: edgeId, source: nd.id, target: rlId });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Recursively walk a config object and collect cache / rate_limit string references.
+ *
+ * Patterns matched:
+ *  - `cache: "name"` or `cache_resource: "name"` → cache reference
+ *  - `rate_limit: "name"` or `rate_limit_resource: "name"` → rate limit reference (inline field)
+ *  - `rate_limit: { resource: "name" }` → rate limit reference (processor form)
+ */
+function extractResourceRefs(obj: unknown): { caches: Set<string>; rateLimits: Set<string> } {
+  const caches = new Set<string>();
+  const rateLimits = new Set<string>();
+
+  function walk(value: unknown, key?: string, parentKey?: string): void {
+    if (value === null || value === undefined) return;
+
+    if (typeof value === 'string') {
+      if (key === 'cache' || key === 'cache_resource') caches.add(value);
+      if (key === 'rate_limit' || key === 'rate_limit_resource') rateLimits.add(value);
+      // `rate_limit: { resource: "name" }` processor pattern
+      if (key === 'resource' && parentKey === 'rate_limit') rateLimits.add(value);
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, undefined, key);
+      return;
+    }
+
+    if (typeof value === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        walk(v, k, key);
+      }
+    }
+  }
+
+  walk(obj);
+  return { caches, rateLimits };
 }

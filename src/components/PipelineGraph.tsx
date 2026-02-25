@@ -75,7 +75,13 @@ function buildStyledEdges(
   edges: Edge[],
   nodeMetricsMap: Map<string, ComponentMetrics>,
   maxInputReceived: number,
+  graph: PipelineGraphType,
 ): Edge[] {
+  // Build a set of resource node IDs (cache / rate_limit) so we can skip their edges
+  const resourceNodeIds = new Set(
+    graph.nodes.filter((n) => n.type === 'cache' || n.type === 'rate_limit').map((n) => n.id),
+  );
+
   // Collect per-edge traffic values so we can compute the range
   const edgeTrafficValues: (number | undefined)[] = edges.map((edge) => {
     const srcM = nodeMetricsMap.get(edge.source);
@@ -91,6 +97,11 @@ function buildStyledEdges(
 
   return edges.map((edge, i) => {
     const traffic = edgeTrafficValues[i];
+
+    // Resource edges (to cache / rate_limit) keep their static dashed style
+    if (resourceNodeIds.has(edge.target) || resourceNodeIds.has(edge.source)) {
+      return edge;
+    }
 
     // No metrics available – keep default style
     if (traffic === undefined) {
@@ -202,8 +213,8 @@ export default function PipelineGraphView({ graph, metrics, metricsHistory, sele
 
   // Style edges based on traffic volume
   const styledEdges = useMemo(
-    () => (metrics ? buildStyledEdges(layoutedEdges, nodeMetricsMap, maxInputReceived) : layoutedEdges),
-    [layoutedEdges, nodeMetricsMap, maxInputReceived, metrics],
+    () => (metrics ? buildStyledEdges(layoutedEdges, nodeMetricsMap, maxInputReceived, graph) : layoutedEdges),
+    [layoutedEdges, nodeMetricsMap, maxInputReceived, metrics, graph],
   );
 
   const [, , onNodesChange] = useNodesState(nodesWithMetrics);

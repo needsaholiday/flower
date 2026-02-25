@@ -59,13 +59,21 @@ export function layoutGraph(
     };
   });
 
-  const layoutedEdges: Edge[] = graph.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    animated: true,
-    style: { stroke: '#6b7280', strokeWidth: 2 },
-  }));
+  const layoutedEdges: Edge[] = graph.edges.map((edge) => {
+    // Detect resource edges (target is a cache or rate_limit node)
+    const targetNode = graph.nodes.find((n) => n.id === edge.target);
+    const isResourceEdge = targetNode?.type === 'cache' || targetNode?.type === 'rate_limit';
+
+    return {
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      animated: !isResourceEdge,
+      style: isResourceEdge
+        ? { stroke: '#585b70', strokeWidth: 1.5, strokeDasharray: '6 3' }
+        : { stroke: '#6b7280', strokeWidth: 2 },
+    };
+  });
 
   return { nodes: layoutedNodes, edges: layoutedEdges };
 }
