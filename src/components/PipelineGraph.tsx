@@ -77,9 +77,12 @@ function buildStyledEdges(
   maxInputReceived: number,
   graph: PipelineGraphType,
 ): Edge[] {
-  // Build a set of resource node IDs (cache / rate_limit) so we can skip their edges
+  // Build a set of resource node IDs (cache / rate_limit) and merge node IDs so we can skip their edges
   const resourceNodeIds = new Set(
     graph.nodes.filter((n) => n.type === 'cache' || n.type === 'rate_limit').map((n) => n.id),
+  );
+  const mergeNodeIds = new Set(
+    graph.nodes.filter((n) => n.type === 'merge').map((n) => n.id),
   );
 
   // Collect per-edge traffic values so we can compute the range
@@ -103,7 +106,12 @@ function buildStyledEdges(
       return edge;
     }
 
-    // No metrics available – keep default style
+    // Edges to/from merge nodes: keep labels, use subtle style
+    if (mergeNodeIds.has(edge.target) || mergeNodeIds.has(edge.source)) {
+      return edge;
+    }
+
+    // No metrics available – keep default style (preserving any labels)
     if (traffic === undefined) {
       return edge;
     }
@@ -114,12 +122,12 @@ function buildStyledEdges(
         ...edge,
         animated: false,
         style: {
-          stroke: '#f97316', // orange-500
+          stroke: '#f97316',
           strokeWidth: MIN_EDGE_WIDTH,
           strokeDasharray: '6 3',
           opacity: 0.85,
         },
-        label: '0',
+        label: edge.label ?? '0',
         labelStyle: { fill: '#f97316', fontSize: 11, fontWeight: 600 },
         labelBgStyle: { fill: '#1e1e2e', fillOpacity: 0.8 },
       };
@@ -129,21 +137,22 @@ function buildStyledEdges(
     const ratio = traffic / maxTraffic;
     let strokeWidth = MIN_EDGE_WIDTH + ratio * (MAX_EDGE_WIDTH - MIN_EDGE_WIDTH);
 
-    // Overflow: edge carries more than the pipeline input received
     const isOverflow = maxInputReceived > 0 && traffic > maxInputReceived;
     if (isOverflow) {
       strokeWidth = MAX_EDGE_WIDTH + OVERFLOW_EXTRA_WIDTH;
     }
 
-    return {
+    const styled: Edge = {
       ...edge,
       animated: true,
       style: {
-        stroke: isOverflow ? '#38bdf8' : '#6b7280', // sky-400 for overflow, gray otherwise
+        stroke: isOverflow ? '#38bdf8' : '#6b7280',
         strokeWidth,
         transition: 'stroke-width 0.4s ease, stroke 0.4s ease',
       },
     };
+
+    return styled;
   });
 }
 
@@ -252,6 +261,7 @@ export default function PipelineGraphView({ graph, metrics, metricsHistory, sele
               output: '#10b981',
               cache: '#f59e0b',
               rate_limit: '#ef4444',
+              merge: '#585b70',
             };
             return colors[nd.nodeType] ?? '#6b7280';
           }}

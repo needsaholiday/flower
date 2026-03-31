@@ -27,6 +27,354 @@ function getLabel(config: Record<string, unknown>): string {
   return getComponentType(config);
 }
 
+/** Truncate a check condition for edge labels */
+function truncateCheck(check: string, maxLen = 40): string {
+  if (check.length <= maxLen) return check;
+  return check.slice(0, maxLen - 1) + '…';
+}
+
+// --- Processor types that contain nested sub-processors ---
+
+const DIRECT_ARRAY_WRAPPERS = new Set(['try', 'catch', 'for_each', 'processors']);
+const OBJECT_WRAPPERS = new Set(['while', 'parallel', 'retry', 'branch']);
+const BRANCHING_PROCESSORS = new Set(['switch', 'group_by']);
+
+interface ChainResult {
+  entryId: string | null;
+  exitIds: string[];
+}
+
+/**
+ * Recursively expand a list of processors into graph nodes and edges.
+ * Returns the entry node ID and the set of exit node IDs (for connecting to the next element).
+ */
+function expandProcessorChain(
+  processors: Array<Record<string, unknown>>,
+  idPrefix: string,
+  metricPrefix: string,
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+): ChainResult {
+  if (processors.length === 0) return { entryId: null, exitIds: [] };
+
+  let firstNodeId: string | null = null;
+  let prevExitIds: string[] = [];
+
+  for (let i = 0; i < processors.length; i++) {
+    const proc = processors[i]!;
+    const procType = getComponentType(proc);
+    const procId = `${idPrefix}-${i}`;
+    const procMetric = `${metricPrefix}.${i}`;
+    const procLabel = getLabel(proc);
+    const componentLabel = typeof proc['label'] === 'string' ? proc['label'] : undefined;
+
+    if (BRANCHING_PROCESSORS.has(procType)) {
+      // --- Category A: switch / group_by (branching) ---
+      const result = expandBranchingProcessor(
+        proc, procType, procId, procMetric, procLabel, componentLabel, nodes, edges,
+      );
+
+      if (!firstNodeId) firstNodeId = result.entryId;
+      for (const prevId of prevExitIds) {
+        if (result.entryId) {
+          edges.push({ id: `e-${prevId}-${result.entryId}`, source: prevId, target: result.entryId });
+        }
+      }
+      prevExitIds = result.exitIds;
+
+    } else if (DIRECT_ARRAY_WRAPPERS.has(procType)) {
+      // --- Category B1: try, catch, for_each, processors (direct array wrappers) ---
+      const childProcessors = proc[procType] as Array<Record<string, unknown>> | undefined;
+      const result = expandSequentialWrapper(
+        proc, procType, procId, procMetric, procLabel, componentLabel,
+        childProcessors ?? [], nodes, edges,
+      );
+
+      if (!firstNodeId) firstNodeId = result.entryId;
+      for (const prevId of prevExitIds) {
+        if (result.entryId) {
+          edges.push({ id: `e-${prevId}-${result.entryId}`, source: prevId, target: result.entryId });
+        }
+      }
+      prevExitIds = result.exitIds;
+
+    } else if (OBJECT_WRAPPERS.has(procType)) {
+      // --- Category B2: while, parallel, retry, branch (object wrappers with .processors) ---
+      const wrapperConfig = proc[procType] as Record<string, unknown> | undefined;
+      const childProcessors = (wrapperConfig?.['processors'] as Array<Record<string, unknown>>) ?? [];
+      const result = expandSequentialWrapper(
+        proc, procType, procId, procMetric, procLabel, componentLabel,
+        childProcessors, nodes, edges,
+      );
+
+      if (!firstNodeId) firstNodeId = result.entryId;
+      for (const prevId of prevExitIds) {
+        if (result.entryId) {
+          edges.push({ id: `e-${prevId}-${result.entryId}`, source: prevId, target: result.entryId });
+        }
+      }
+      prevExitIds = result.exitIds;
+
+    } else if (procType === 'workflow') {
+      // --- Category C: workflow ---
+      const result = expandWorkflowProcessor(
+        proc, procId, procMetric, procLabel, componentLabel, nodes, edges,
+      );
+
+      if (!firstNodeId) firstNodeId = result.entryId;
+      for (const prevId of prevExitIds) {
+        if (result.entryId) {
+          edges.push({ id: `e-${prevId}-${result.entryId}`, source: prevId, target: result.entryId });
+        }
+      }
+      prevExitIds = result.exitIds;
+
+    } else {
+      // --- Category D: leaf processor ---
+      nodes.push({
+        id: procId,
+        type: 'processor',
+        label: procLabel,
+        componentType: procType,
+        metricPath: procMetric,
+        componentLabel,
+        config: proc,
+      });
+
+      if (!firstNodeId) firstNodeId = procId;
+      for (const prevId of prevExitIds) {
+        edges.push({ id: `e-${prevId}-${procId}`, source: prevId, target: procId });
+      }
+      prevExitIds = [procId];
+    }
+  }
+
+  return { entryId: firstNodeId, exitIds: prevExitIds };
+}
+
+/**
+ * Expand a switch or group_by processor into branching subgraph.
+ */
+function expandBranchingProcessor(
+  proc: Record<string, unknown>,
+  procType: string,
+  procId: string,
+  procMetric: string,
+  procLabel: string,
+  componentLabel: string | undefined,
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+): ChainResult {
+  const switchNodeId = procId;
+  nodes.push({
+    id: switchNodeId,
+    type: 'processor',
+    label: procLabel,
+    componentType: procType,
+    metricPath: procMetric,
+    componentLabel,
+    config: proc,
+  });
+
+  const cases = proc[procType] as Array<Record<string, unknown>> | undefined;
+  if (!cases || !Array.isArray(cases) || cases.length === 0) {
+    return { entryId: switchNodeId, exitIds: [switchNodeId] };
+  }
+
+  const mergeNodeId = `${procId}-merge`;
+  const allCaseExitIds: string[] = [];
+
+  for (let j = 0; j < cases.length; j++) {
+    const caseObj = cases[j]!;
+    const check = caseObj['check'] as string | undefined;
+    const caseProcessors = (caseObj['processors'] as Array<Record<string, unknown>>) ?? [];
+    const edgeLabel = check ? truncateCheck(check) : 'default';
+    const caseIdPrefix = `${procId}-c${j}`;
+    const caseMetricPrefix = `${procMetric}.${procType}.${j}.processors`;
+
+    if (caseProcessors.length === 0) {
+      // Empty case: switch connects directly to merge
+      allCaseExitIds.push(switchNodeId);
+      // Still add a labeled edge from switch to merge (handled below)
+      edges.push({
+        id: `e-${switchNodeId}-${mergeNodeId}-c${j}`,
+        source: switchNodeId,
+        target: mergeNodeId,
+        label: edgeLabel,
+      });
+    } else {
+      const caseResult = expandProcessorChain(
+        caseProcessors, caseIdPrefix, caseMetricPrefix, nodes, edges,
+      );
+
+      if (caseResult.entryId) {
+        edges.push({
+          id: `e-${switchNodeId}-${caseResult.entryId}`,
+          source: switchNodeId,
+          target: caseResult.entryId,
+          label: edgeLabel,
+        });
+        allCaseExitIds.push(...caseResult.exitIds);
+      } else {
+        allCaseExitIds.push(switchNodeId);
+      }
+    }
+  }
+
+  nodes.push({
+    id: mergeNodeId,
+    type: 'merge',
+    label: procLabel,
+    componentType: 'merge',
+    metricPath: procMetric,
+    config: {},
+  });
+
+  // Connect all case exits to merge (skip if we already added direct switch→merge edges for empty cases)
+  for (const exitId of allCaseExitIds) {
+    if (exitId === switchNodeId) continue; // already handled above for empty cases
+    const edgeId = `e-${exitId}-${mergeNodeId}`;
+    if (!edges.some((e) => e.id === edgeId)) {
+      edges.push({ id: edgeId, source: exitId, target: mergeNodeId });
+    }
+  }
+
+  return { entryId: switchNodeId, exitIds: [mergeNodeId] };
+}
+
+/**
+ * Expand a sequential wrapper (try, catch, for_each, while, parallel, retry, processors, branch).
+ * Creates an entry node for the wrapper, then expands children inline.
+ */
+function expandSequentialWrapper(
+  proc: Record<string, unknown>,
+  procType: string,
+  procId: string,
+  procMetric: string,
+  procLabel: string,
+  componentLabel: string | undefined,
+  childProcessors: Array<Record<string, unknown>>,
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+): ChainResult {
+  // Create the wrapper entry node
+  const wrapperNodeId = procId;
+  nodes.push({
+    id: wrapperNodeId,
+    type: 'processor',
+    label: procLabel,
+    componentType: procType,
+    metricPath: procMetric,
+    componentLabel,
+    config: proc,
+  });
+
+  if (childProcessors.length === 0) {
+    return { entryId: wrapperNodeId, exitIds: [wrapperNodeId] };
+  }
+
+  const childIdPrefix = `${procId}-inner`;
+  const childMetricPrefix = `${procMetric}.${procType}.processors`;
+  const childResult = expandProcessorChain(
+    childProcessors, childIdPrefix, childMetricPrefix, nodes, edges,
+  );
+
+  if (childResult.entryId) {
+    edges.push({
+      id: `e-${wrapperNodeId}-${childResult.entryId}`,
+      source: wrapperNodeId,
+      target: childResult.entryId,
+    });
+    return { entryId: wrapperNodeId, exitIds: childResult.exitIds };
+  }
+
+  return { entryId: wrapperNodeId, exitIds: [wrapperNodeId] };
+}
+
+/**
+ * Expand a workflow processor into branching subgraph with named branches.
+ */
+function expandWorkflowProcessor(
+  proc: Record<string, unknown>,
+  procId: string,
+  procMetric: string,
+  procLabel: string,
+  componentLabel: string | undefined,
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+): ChainResult {
+  const workflowNodeId = procId;
+  nodes.push({
+    id: workflowNodeId,
+    type: 'processor',
+    label: procLabel,
+    componentType: 'workflow',
+    metricPath: procMetric,
+    componentLabel,
+    config: proc,
+  });
+
+  const workflowConfig = proc['workflow'] as Record<string, unknown> | undefined;
+  const branches = workflowConfig?.['branches'] as Record<string, Record<string, unknown>> | undefined;
+
+  if (!branches || Object.keys(branches).length === 0) {
+    return { entryId: workflowNodeId, exitIds: [workflowNodeId] };
+  }
+
+  const mergeNodeId = `${procId}-merge`;
+  const allBranchExitIds: string[] = [];
+  const branchNames = Object.keys(branches);
+
+  for (let j = 0; j < branchNames.length; j++) {
+    const branchName = branchNames[j]!;
+    const branchConfig = branches[branchName]!;
+    const branchProcessors = (branchConfig['processors'] as Array<Record<string, unknown>>) ?? [];
+    const branchIdPrefix = `${procId}-br-${branchName}`;
+    const branchMetricPrefix = `${procMetric}.workflow.branches.${branchName}.processors`;
+
+    if (branchProcessors.length === 0) {
+      allBranchExitIds.push(workflowNodeId);
+    } else {
+      const branchResult = expandProcessorChain(
+        branchProcessors, branchIdPrefix, branchMetricPrefix, nodes, edges,
+      );
+
+      if (branchResult.entryId) {
+        edges.push({
+          id: `e-${workflowNodeId}-${branchResult.entryId}`,
+          source: workflowNodeId,
+          target: branchResult.entryId,
+          label: branchName,
+        });
+        allBranchExitIds.push(...branchResult.exitIds);
+      } else {
+        allBranchExitIds.push(workflowNodeId);
+      }
+    }
+  }
+
+  nodes.push({
+    id: mergeNodeId,
+    type: 'merge',
+    label: procLabel,
+    componentType: 'merge',
+    metricPath: procMetric,
+    config: {},
+  });
+
+  for (const exitId of allBranchExitIds) {
+    if (exitId === workflowNodeId) continue;
+    const edgeId = `e-${exitId}-${mergeNodeId}`;
+    if (!edges.some((e) => e.id === edgeId)) {
+      edges.push({ id: edgeId, source: exitId, target: mergeNodeId });
+    }
+  }
+
+  return { entryId: workflowNodeId, exitIds: [mergeNodeId] };
+}
+
+// --- Sub-output expansion (broker / switch output / fan_out) ---
+
 /**
  * Recursively extract sub-outputs from broker/switch/fan_out etc.
  * These are output types that contain multiple child outputs.
@@ -41,7 +389,6 @@ function extractSubOutputs(
   const outputType = getComponentType(output);
   const outputConfig = output[outputType];
 
-  // Handle broker pattern: { broker: { outputs: [...] } }
   if (outputType === 'broker' && typeof outputConfig === 'object' && outputConfig !== null) {
     const brokerConfig = outputConfig as Record<string, unknown>;
     const outputs = brokerConfig['outputs'] as Array<Record<string, unknown>> | undefined;
@@ -65,7 +412,6 @@ function extractSubOutputs(
     }
   }
 
-  // Handle switch pattern: { switch: { cases: [...] } }
   if (outputType === 'switch' && typeof outputConfig === 'object' && outputConfig !== null) {
     const switchConfig = outputConfig as Record<string, unknown>;
     const cases = switchConfig['cases'] as Array<Record<string, unknown>> | undefined;
@@ -93,7 +439,6 @@ function extractSubOutputs(
     }
   }
 
-  // Handle fan_out pattern: { fan_out: [...] }
   if (outputType === 'fan_out' && Array.isArray(outputConfig)) {
     for (let i = 0; i < outputConfig.length; i++) {
       const sub = outputConfig[i] as Record<string, unknown>;
@@ -113,6 +458,8 @@ function extractSubOutputs(
     return;
   }
 }
+
+// --- Main entry point ---
 
 /**
  * Parse a Benthos YAML config string into a PipelineGraph of nodes and edges.
@@ -136,27 +483,15 @@ export function configToGraph(yamlStr: string): PipelineGraph {
     });
   }
 
-  // --- Processors ---
+  // --- Processors (recursive expansion) ---
   const processors = config.pipeline?.processors ?? [];
-  for (let i = 0; i < processors.length; i++) {
-    const proc = processors[i]!;
-    const procType = getComponentType(proc);
-    const procId = `processor-${i}`;
-    nodes.push({
-      id: procId,
-      type: 'processor',
-      label: getLabel(proc),
-      componentType: procType,
-      metricPath: `root.pipeline.processors.${i}`,
-      componentLabel: typeof proc['label'] === 'string' ? proc['label'] : undefined,
-      config: proc,
-    });
+  const chainResult = expandProcessorChain(
+    processors, 'proc', 'root.pipeline.processors', nodes, edges,
+  );
 
-    // Edge from previous node
-    const prevId = i === 0 ? 'input' : `processor-${i - 1}`;
-    if (nodes.find(n => n.id === prevId)) {
-      edges.push({ id: `e-${prevId}-${procId}`, source: prevId, target: procId });
-    }
+  // Connect input to first processor
+  if (chainResult.entryId && nodes.find((n) => n.id === 'input')) {
+    edges.push({ id: `e-input-${chainResult.entryId}`, source: 'input', target: chainResult.entryId });
   }
 
   // --- Output ---
@@ -173,13 +508,15 @@ export function configToGraph(yamlStr: string): PipelineGraph {
       config: config.output,
     });
 
-    // Edge from last processor (or input if no processors)
-    const prevId = processors.length > 0 ? `processor-${processors.length - 1}` : 'input';
-    if (nodes.find(n => n.id === prevId)) {
-      edges.push({ id: `e-${prevId}-${outputId}`, source: prevId, target: outputId });
+    // Connect last processor exits (or input) to output
+    const exitIds = chainResult.exitIds.length > 0
+      ? chainResult.exitIds
+      : (nodes.find((n) => n.id === 'input') ? ['input'] : []);
+
+    for (const exitId of exitIds) {
+      edges.push({ id: `e-${exitId}-${outputId}`, source: exitId, target: outputId });
     }
 
-    // Expand broker/switch/fan_out sub-outputs
     extractSubOutputs(config.output, outputId, 'root.output', nodes, edges);
   }
 
@@ -221,24 +558,17 @@ export function configToGraph(yamlStr: string): PipelineGraph {
     }
   }
 
-  // --- Connect cache & rate_limit resources to the nodes that reference them ---
   connectResources(nodes, edges);
 
   return { nodes, edges };
 }
 
-/**
- * Build lookup maps for cache and rate_limit resource nodes by their label,
- * then scan all processor/output node configs to find references and create edges.
- *
- * Cache references appear as e.g. `dedupe: { cache: "mem" }` or `cache: "mem"` at any depth.
- * Rate-limit references appear as e.g. `http_client: { rate_limit: "foo" }`.
- */
+// --- Resource connection ---
+
 function connectResources(
   nodes: PipelineNode[],
   edges: PipelineEdge[],
 ): void {
-  // Build label → nodeId lookup for caches and rate limits
   const cacheNodeByLabel = new Map<string, string>();
   const rateLimitNodeByLabel = new Map<string, string>();
   for (const nd of nodes) {
@@ -247,9 +577,8 @@ function connectResources(
   }
   if (cacheNodeByLabel.size === 0 && rateLimitNodeByLabel.size === 0) return;
 
-  // Scan each non-resource node's config for cache / rate_limit references
   for (const nd of nodes) {
-    if (nd.type === 'cache' || nd.type === 'rate_limit' || !nd.config) continue;
+    if (nd.type === 'cache' || nd.type === 'rate_limit' || nd.type === 'merge' || !nd.config) continue;
 
     const refs = extractResourceRefs(nd.config);
 
@@ -275,14 +604,6 @@ function connectResources(
   }
 }
 
-/**
- * Recursively walk a config object and collect cache / rate_limit string references.
- *
- * Patterns matched:
- *  - `cache: "name"` or `cache_resource: "name"` → cache reference
- *  - `rate_limit: "name"` or `rate_limit_resource: "name"` → rate limit reference (inline field)
- *  - `rate_limit: { resource: "name" }` → rate limit reference (processor form)
- */
 function extractResourceRefs(obj: unknown): { caches: Set<string>; rateLimits: Set<string> } {
   const caches = new Set<string>();
   const rateLimits = new Set<string>();
@@ -293,7 +614,6 @@ function extractResourceRefs(obj: unknown): { caches: Set<string>; rateLimits: S
     if (typeof value === 'string') {
       if (key === 'cache' || key === 'cache_resource') caches.add(value);
       if (key === 'rate_limit' || key === 'rate_limit_resource') rateLimits.add(value);
-      // `rate_limit: { resource: "name" }` processor pattern
       if (key === 'resource' && parentKey === 'rate_limit') rateLimits.add(value);
       return;
     }

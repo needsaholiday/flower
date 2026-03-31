@@ -47,7 +47,7 @@ export interface MetricsTimePoint {
 /** A node in the pipeline DAG */
 export interface PipelineNode {
   id: string;
-  type: 'input' | 'processor' | 'output' | 'cache' | 'rate_limit';
+  type: 'input' | 'processor' | 'output' | 'cache' | 'rate_limit' | 'merge';
   label: string;
   componentType: string;
   metricPath: string;
@@ -61,6 +61,7 @@ export interface PipelineEdge {
   id: string;
   source: string;
   target: string;
+  label?: string;
 }
 
 /** Parsed pipeline graph */

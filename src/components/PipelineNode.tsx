@@ -6,7 +6,7 @@ import Sparkline from './Sparkline';
 
 export interface PipelineNodeData {
   label: string;
-  nodeType: 'input' | 'processor' | 'output' | 'cache' | 'rate_limit';
+  nodeType: 'input' | 'processor' | 'output' | 'cache' | 'rate_limit' | 'merge';
   componentType: string;
   metricPath: string;
   componentLabel?: string;
@@ -24,6 +24,17 @@ const TYPE_COLORS: Record<string, string> = {
   output: '#10b981',
   cache: '#f59e0b',
   rate_limit: '#ef4444',
+  merge: '#585b70',
+};
+
+const COMPONENT_COLORS: Record<string, string> = {
+  switch: '#f59e0b',
+  group_by: '#f59e0b',
+  workflow: '#38bdf8',
+  try: '#a6e3a1',
+  catch: '#f38ba8',
+  while: '#cba6f7',
+  retry: '#fab387',
 };
 
 const TYPE_ICONS: Record<string, string> = {
@@ -32,6 +43,20 @@ const TYPE_ICONS: Record<string, string> = {
   output: '📤',
   cache: '💾',
   rate_limit: '🚦',
+  merge: '◇',
+};
+
+const COMPONENT_ICONS: Record<string, string> = {
+  switch: '🔀',
+  group_by: '🔀',
+  workflow: '🔄',
+  try: '🛡️',
+  catch: '🪤',
+  while: '🔁',
+  retry: '♻️',
+  branch: '🌿',
+  for_each: '🔂',
+  parallel: '⏩',
 };
 
 function MetricsBadge({ metrics, nodeType }: { metrics?: ComponentMetrics; nodeType: string }) {
@@ -216,14 +241,28 @@ function ExpandedMetrics({
 
 function PipelineNodeComponent({ data }: NodeProps) {
   const nodeData = data as unknown as PipelineNodeData;
-  const color = TYPE_COLORS[nodeData.nodeType] ?? '#6b7280';
-  const icon = TYPE_ICONS[nodeData.nodeType] ?? '📦';
+
+  if (nodeData.nodeType === 'merge') {
+    return (
+      <div style={mergeNodeStyle}>
+        <Handle type="target" position={Position.Top} style={handleStyle} />
+        <span style={mergeLabelStyle}>{nodeData.label}</span>
+        <Handle type="source" position={Position.Bottom} style={handleStyle} />
+      </div>
+    );
+  }
+
+  const componentColor = COMPONENT_COLORS[nodeData.componentType];
+  const color = componentColor ?? TYPE_COLORS[nodeData.nodeType] ?? '#6b7280';
+  const icon = COMPONENT_ICONS[nodeData.componentType] ?? TYPE_ICONS[nodeData.nodeType] ?? '📦';
   const isExpanded = !!nodeData.selected;
+  const isBranching = nodeData.componentType === 'switch' || nodeData.componentType === 'group_by' || nodeData.componentType === 'workflow';
 
   return (
     <div style={{
       ...nodeStyle,
       borderColor: color,
+      ...(isBranching ? { borderStyle: 'solid', borderWidth: 2.5 } : {}),
       ...(isExpanded ? expandedNodeStyle : {}),
       ...(nodeData.selected ? { boxShadow: `0 0 20px ${color}44, 0 4px 12px rgba(0,0,0,0.3)` } : {}),
     }}>
@@ -374,4 +413,27 @@ const miniChartValueStyle: CSSProperties = {
   fontSize: 12,
   fontWeight: 700,
   fontFamily: "'JetBrains Mono', monospace",
+};
+
+const mergeNodeStyle: CSSProperties = {
+  background: '#181825',
+  border: '1.5px solid #585b70',
+  borderRadius: 20,
+  padding: '4px 16px',
+  minWidth: 60,
+  fontFamily: "'Inter', system-ui, sans-serif",
+  color: '#6c7086',
+  boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 6,
+};
+
+const mergeLabelStyle: CSSProperties = {
+  fontSize: 10,
+  fontWeight: 500,
+  color: '#585b70',
+  textTransform: 'uppercase',
+  letterSpacing: '0.5px',
 };
