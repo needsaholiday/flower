@@ -1,4 +1,4 @@
-import { useState, useCallback, type CSSProperties } from 'react';
+import { useState, useCallback, useEffect, useMemo, type CSSProperties } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { useTargets } from './hooks/useTargets';
 import { useBenthosConfig } from './hooks/useBenthosConfig';
@@ -9,9 +9,12 @@ import PipelineGraphView from './components/PipelineGraph';
 import MetricsPanel from './components/MetricsPanel';
 import RuntimeMetricsPanel from './components/RuntimeMetricsPanel';
 import type { PipelineNodeData } from './components/PipelineNode';
-import type { PipelineGraph } from './types';
+import type { MultiPipelineGraph, PipelineGraph } from './types';
 
-function findNodeData(graph: PipelineGraph | undefined, nodeId: string): PipelineNodeData | null {
+function findNodeData(multiGraph: MultiPipelineGraph | undefined, streamName: string | null, nodeId: string): PipelineNodeData | null {
+  if (!multiGraph || !streamName) return null;
+  const stream = multiGraph.streams.find((s) => s.name === streamName);
+  const graph = stream?.graph ?? multiGraph.legacy;
   if (!graph) return null;
   const node = graph.nodes.find((n) => n.id === nodeId);
   if (!node) return null;
@@ -25,14 +28,37 @@ function findNodeData(graph: PipelineGraph | undefined, nodeId: string): Pipelin
   };
 }
 
+function getGraph(multiGraph: MultiPipelineGraph | undefined, streamName: string | null): PipelineGraph | undefined {
+  if (!multiGraph || !streamName) return multiGraph?.legacy;
+  const stream = multiGraph.streams.find((s) => s.name === streamName);
+  return stream?.graph ?? multiGraph.legacy;
+}
+
 export default function App() {
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [selectedStream, setSelectedStream] = useState<string | null>(null);
 
   const { data: targets, isLoading: targetsLoading, error: targetsError } = useTargets();
-  const { data: graph, isLoading: configLoading, error: configError } = useBenthosConfig(selectedTarget);
+  const { data: multiGraph, isLoading: configLoading, error: configError } = useBenthosConfig(selectedTarget);
   const { data: metrics, history: metricsHistory } = useBenthosMetrics(selectedTarget);
   const { data: runtimeSnapshots } = useRuntimeMetrics(selectedTarget);
+
+  const streamNames = useMemo(() => {
+    if (!multiGraph) return [];
+    if (multiGraph.hasStreams) {
+      return multiGraph.streams.map((s) => s.name);
+    }
+    return ['default'];
+  }, [multiGraph]);
+
+  // Auto-select first stream only when the target changes,
+  // preserving the user's current selection on refetches.
+  useEffect(() => {
+    if (streamNames.length > 0 && !selectedStream) {
+      setSelectedStream(streamNames[0] ?? null);
+    }
+  }, [selectedTarget, streamNames]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTargetSelect = useCallback((name: string) => {
     setSelectedTarget(name);
@@ -47,11 +73,14 @@ export default function App() {
     setSelectedNode(null);
   }, []);
 
-  const selectedNodeData = findNodeData(graph, selectedNode ?? '');
+  const activeGraph = getGraph(multiGraph, selectedStream);
+  const selectedNodeData = findNodeData(multiGraph, selectedStream, selectedNode ?? '');
   const selectedNodeMetrics = selectedNode && selectedNodeData && metrics
     ? (metrics.byPath.get(selectedNodeData.metricPath) ??
        (selectedNodeData.componentLabel ? metrics.byLabel.get(selectedNodeData.componentLabel) : undefined))
     : undefined;
+
+  const showStreamTabs = multiGraph?.hasStreams && streamNames.length > 1;
 
   return (
     <div style={appStyle}>
@@ -98,12 +127,31 @@ export default function App() {
               Make sure debug_endpoints is enabled on the target instance.
             </p>
           </div>
-        ) : graph ? (
+        ) : activeGraph ? (
           <>
+            {showStreamTabs && (
+              <div style={streamTabsStyle}>
+                {streamNames.map((name) => (
+                  <button
+                    key={name}
+                    style={{
+                      ...streamTabStyle,
+                      ...(selectedStream === name ? streamTabActiveStyle : {}),
+                    }}
+                    onClick={() => {
+                      setSelectedStream(name);
+                      setSelectedNode(null);
+                    }}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            )}
             <div style={graphAreaStyle}>
               <ReactFlowProvider>
                 <PipelineGraphView
-                  graph={graph}
+                  graph={activeGraph}
                   metrics={metrics}
                   metricsHistory={metricsHistory}
                   selectedNodeId={selectedNode}
@@ -159,6 +207,35 @@ const mainStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
+};
+
+const streamTabsStyle: CSSProperties = {
+  display: 'flex',
+  gap: 4,
+  padding: '8px 12px 0',
+  borderBottom: '1px solid #313244',
+  background: '#181825',
+  flexShrink: 0,
+};
+
+const streamTabStyle: CSSProperties = {
+  padding: '6px 16px',
+  background: 'transparent',
+  border: '1px solid transparent',
+  borderRadius: '6px 6px 0 0',
+  color: '#9399b2',
+  fontSize: 12,
+  fontWeight: 600,
+  fontFamily: "'JetBrains Mono', monospace",
+  cursor: 'pointer',
+  transition: 'all 0.15s',
+  letterSpacing: '0.3px',
+};
+
+const streamTabActiveStyle: CSSProperties = {
+  background: '#1e1e2e',
+  color: '#cdd6f4',
+  borderColor: '#45475a',
 };
 
 const graphAreaStyle: CSSProperties = {

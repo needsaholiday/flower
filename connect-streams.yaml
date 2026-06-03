@@ -1,0 +1,191 @@
+# Sample Redpanda Connect config with multiple streams
+# Each stream has its own input, pipeline (processors), and output.
+#
+# Run with: docker run --rm -p 4195:4195 -v $(pwd)/connect-streams.yaml:/connect.yaml docker.redpanda.com/redpandadata/connect:4.63.0 -c /connect.yaml
+
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+  root_path: /benthos
+  debug_endpoints: true
+
+streams:
+  # ── Stream 1: Order processing pipeline ──────────────────────────
+  - name: orders
+    input:
+      label: order_generator
+      generate:
+        interval: 1s
+        count: 1
+        mapping: |
+          root.order_id = uuid_v4()
+          root.customer_id = "cust_%d".format(random_int(min: 1, max: 100))
+          root.items = [
+            {"sku": "SKU-%d".format(random_int(min: 1, max: 50)), "qty": random_int(min: 1, max: 10)},
+          ]
+          root.total = random_int(min: 100, max: 10000).number() / 100
+          root.status = ["pending", "processing", "shipped", "delivered"].index(random_int(min: 0, max: 3))
+          root.ts = now()
+
+    pipeline:
+      processors:
+        - label: parse_order
+          mapping: |
+            root.parsed = true
+            root.order_date = now().format_time("%Y-%m-%d")
+            root.item_count = if typeof this.items == "array" { this.items.len() } else { 0 }
+
+        - label: classify_order
+          mapping: |
+            root.order_tier = if this.total > 5000 { "premium" } else if this.total > 1000 { "standard" } else { "basic" }
+
+        - label: enrich_with_metadata
+          log:
+            level: DEBUG
+            message: 'Processing order ${! json("order_id") } for customer ${! json("customer_id") }'
+
+        - label: dedup_orders
+          dedupe:
+            cache: order_cache
+            key: ${! json("order_id") }
+
+    output:
+      label: order_sink
+      broker:
+        outputs:
+          - label: pending_orders
+            kafka:
+              addresses: ["kafka:9092"]
+              topic: "orders.pending"
+              key: '${! json("customer_id") }'
+
+          - label: processed_orders
+            kafka:
+              addresses: ["kafka:9092"]
+              topic: "orders.processed"
+              key: '${! json("order_id") }'
+
+    cache_resources:
+      - label: order_cache
+        memory:
+          default_ttl: 300s
+
+  # ── Stream 2: Clickstream analytics pipeline ─────────────────────
+  - name: clickstream
+    input:
+      label: click_generator
+      generate:
+        interval: 500ms
+        count: 1
+        mapping: |
+          root.event_id = uuid_v4()
+          root.event_type = ["page_view", "click", "scroll", "hover"].index(random_int(min: 0, max: 3))
+          root.page = "/products/%d".format(random_int(min: 1, max: 200))
+          root.session_id = "sess_%d".format(random_int(min: 1, max: 50))
+          root.timestamp = now()
+          root.ip = "%d.%d.%d.%d".format(random_int(min: 1, max: 254), random_int(min: 0, max: 255), random_int(min: 0, max: 255), random_int(min: 0, max: 255))
+
+    pipeline:
+      processors:
+        - label: enrich_click
+          mapping: |
+            root.page_category = if this.page.contains("/products/") { "product" } else if this.page.contains("/category/") { "category" } else { "other" }
+            root.is_mobile = random_int(min: 0, max: 1) == 1
+            root.duration_ms = random_int(min: 100, max: 30000)
+
+        - label: filter_bots
+          filter:
+            check: this.ip != "0.0.0.0"
+
+        - label: aggregate_clicks
+          for_each:
+            processors:
+              - label: tag_click
+                mapping: |
+                  root.tags = this.tags || []
+                  root.tags = append(root.tags, this.event_type)
+                  root.tags = append(root.tags, this.page_category)
+
+    output:
+      label: click_sink
+      kafka:
+        addresses: ["kafka:9092"]
+        topic: "clickstream.events"
+        key: '${! json("session_id") }'
+
+  # ── Stream 3: Error monitoring pipeline ──────────────────────────
+  - name: errors
+    input:
+      label: error_input
+      log:
+        level: ERROR
+        message: "Simulated error: ${! random_string(32) }"
+        interval: "5s"
+
+    pipeline:
+      processors:
+        - label: parse_error
+          mapping: |
+            root.error_id = uuid_v4()
+            root.error_type = ["timeout", "connection_refused", "dns_failure", "ssl_error"].index(random_int(min: 0, max: 3))
+            root.severity = ["info", "warning", "critical"].index(random_int(min: 0, max: 2))
+            root.service = ["api-gateway", "user-service", "order-service", "payment-service"].index(random_int(min: 0, max: 3))
+
+        - label: route_by_severity
+          switch:
+            cases:
+              - check: this.severity == "critical"
+                processors:
+                  - label: critical_alert
+                    log:
+                      level: ERROR
+                      message: 'CRITICAL error from ${! json("service") }: ${! json("error_type") }'
+
+              - check: this.severity == "warning"
+                processors:
+                  - label: warning_log
+                    log:
+                      level: WARN
+                      message: 'WARNING from ${! json("service") }: ${! json("error_type") }'
+
+              - output:
+                  label: info_log
+                  log:
+                    level: INFO
+                    message: 'INFO from ${! json("service") }: ${! json("error_type") }'
+
+    output:
+      label: error_sink
+      broker:
+        outputs:
+          - label: elasticsearch
+            elasticsearch:
+              urls: ["http://elastic:9200"]
+              index: "errors-%{+yyyy.MM.dd}"
+
+          - label: slack_alerts
+            slack:
+              title: 'Error Alert: ${! json("severity") }'
+              message: 'Service: ${! json("service") } | Type: ${! json("error_type") }'
+              channel: "#errors"
+
+cache_resources:
+  - label: global_cache
+    memory:
+      default_ttl: 60s
+
+rate_limit_resources:
+  - label: global_limiter
+    local:
+      count: 100
+      interval: 1s
+
+metrics:
+  prometheus:
+    add_process_metrics: true
+    add_go_metrics: true
+
+logger:
+  level: INFO
+  format: logfmt
+  add_timestamp: true

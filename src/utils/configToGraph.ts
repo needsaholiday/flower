@@ -1,5 +1,16 @@
 import yaml from 'js-yaml';
-import type { PipelineGraph, PipelineNode, PipelineEdge } from '../types';
+import type { PipelineGraph, PipelineNode, PipelineEdge, PipelineStream, MultiPipelineGraph } from '../types';
+
+interface BenthosStream {
+  name: string;
+  input?: Record<string, unknown>;
+  pipeline?: {
+    processors?: Array<Record<string, unknown>>;
+  };
+  output?: Record<string, unknown>;
+  cache_resources?: Array<Record<string, unknown>>;
+  rate_limit_resources?: Array<Record<string, unknown>>;
+}
 
 interface BenthosConfig {
   input?: Record<string, unknown>;
@@ -9,6 +20,7 @@ interface BenthosConfig {
   output?: Record<string, unknown>;
   cache_resources?: Array<Record<string, unknown>>;
   rate_limit_resources?: Array<Record<string, unknown>>;
+  streams?: BenthosStream[];
 }
 
 /** Extract the component type name from a Benthos config object (first key that isn't 'label') */
@@ -459,111 +471,37 @@ function extractSubOutputs(
   }
 }
 
-// --- Main entry point ---
-
-/**
- * Parse a Benthos YAML config string into a PipelineGraph of nodes and edges.
- */
-export function configToGraph(yamlStr: string): PipelineGraph {
-  const config = yaml.load(yamlStr) as BenthosConfig;
-  const nodes: PipelineNode[] = [];
-  const edges: PipelineEdge[] = [];
-
-  // --- Input ---
-  if (config.input) {
-    const inputType = getComponentType(config.input);
-    nodes.push({
-      id: 'input',
-      type: 'input',
-      label: getLabel(config.input),
-      componentType: inputType,
-      metricPath: 'root.input',
-      componentLabel: typeof config.input['label'] === 'string' ? config.input['label'] : undefined,
-      config: config.input,
-    });
-  }
-
-  // --- Processors (recursive expansion) ---
-  const processors = config.pipeline?.processors ?? [];
-  const chainResult = expandProcessorChain(
-    processors, 'proc', 'root.pipeline.processors', nodes, edges,
-  );
-
-  // Connect input to first processor
-  if (chainResult.entryId && nodes.find((n) => n.id === 'input')) {
-    edges.push({ id: `e-input-${chainResult.entryId}`, source: 'input', target: chainResult.entryId });
-  }
-
-  // --- Output ---
-  if (config.output) {
-    const outputType = getComponentType(config.output);
-    const outputId = 'output';
-    nodes.push({
-      id: outputId,
-      type: 'output',
-      label: getLabel(config.output),
-      componentType: outputType,
-      metricPath: 'root.output',
-      componentLabel: typeof config.output['label'] === 'string' ? config.output['label'] : undefined,
-      config: config.output,
-    });
-
-    // Connect last processor exits (or input) to output
-    const exitIds = chainResult.exitIds.length > 0
-      ? chainResult.exitIds
-      : (nodes.find((n) => n.id === 'input') ? ['input'] : []);
-
-    for (const exitId of exitIds) {
-      edges.push({ id: `e-${exitId}-${outputId}`, source: exitId, target: outputId });
-    }
-
-    extractSubOutputs(config.output, outputId, 'root.output', nodes, edges);
-  }
-
-  // --- Cache Resources ---
-  if (config.cache_resources) {
-    for (let i = 0; i < config.cache_resources.length; i++) {
-      const cache = config.cache_resources[i]!;
-      const cacheLabel = (cache['label'] as string) || getComponentType(cache);
-      const cacheType = getComponentType(cache);
-      const cacheId = `cache-${i}`;
-      nodes.push({
-        id: cacheId,
-        type: 'cache',
-        label: cacheLabel,
-        componentType: cacheType,
-        metricPath: `root.resource.cache.${cacheLabel}`,
-        componentLabel: cacheLabel,
-        config: cache,
-      });
-    }
-  }
-
-  // --- Rate Limit Resources ---
-  if (config.rate_limit_resources) {
-    for (let i = 0; i < config.rate_limit_resources.length; i++) {
-      const rl = config.rate_limit_resources[i]!;
-      const rlLabel = (rl['label'] as string) || getComponentType(rl);
-      const rlType = getComponentType(rl);
-      const rlId = `rate-limit-${i}`;
-      nodes.push({
-        id: rlId,
-        type: 'rate_limit',
-        label: rlLabel,
-        componentType: rlType,
-        metricPath: `root.resource.rate_limit.${rlLabel}`,
-        componentLabel: rlLabel,
-        config: rl,
-      });
-    }
-  }
-
-  connectResources(nodes, edges);
-
-  return { nodes, edges };
-}
-
 // --- Resource connection ---
+
+function extractResourceRefs(obj: unknown): { caches: Set<string>; rateLimits: Set<string> } {
+  const caches = new Set<string>();
+  const rateLimits = new Set<string>();
+
+  function walk(value: unknown, key?: string, parentKey?: string): void {
+    if (value === null || value === undefined) return;
+
+    if (typeof value === 'string') {
+      if (key === 'cache' || key === 'cache_resource') caches.add(value);
+      if (key === 'rate_limit' || key === 'rate_limit_resource') rateLimits.add(value);
+      if (key === 'resource' && parentKey === 'rate_limit') rateLimits.add(value);
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, undefined, key);
+      return;
+    }
+
+    if (typeof value === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        walk(v, k, key);
+      }
+    }
+  }
+
+  walk(obj);
+  return { caches, rateLimits };
+}
 
 function connectResources(
   nodes: PipelineNode[],
@@ -604,32 +542,267 @@ function connectResources(
   }
 }
 
-function extractResourceRefs(obj: unknown): { caches: Set<string>; rateLimits: Set<string> } {
-  const caches = new Set<string>();
-  const rateLimits = new Set<string>();
+// --- Build a single stream's graph ---
 
-  function walk(value: unknown, key?: string, parentKey?: string): void {
-    if (value === null || value === undefined) return;
+/**
+ * Build a PipelineGraph from a single stream's input/processors/output configuration.
+ */
+function buildStreamGraph(
+  stream: BenthosStream,
+  topLevelCaches: Array<{ label: string; node: PipelineNode }>,
+  topLevelRateLimits: Array<{ label: string; node: PipelineNode }>,
+): PipelineGraph {
+  const nodes: PipelineNode[] = [];
+  const edges: PipelineEdge[] = [];
 
-    if (typeof value === 'string') {
-      if (key === 'cache' || key === 'cache_resource') caches.add(value);
-      if (key === 'rate_limit' || key === 'rate_limit_resource') rateLimits.add(value);
-      if (key === 'resource' && parentKey === 'rate_limit') rateLimits.add(value);
-      return;
+  // --- Input ---
+  if (stream.input) {
+    const inputType = getComponentType(stream.input);
+    nodes.push({
+      id: 'input',
+      type: 'input',
+      label: getLabel(stream.input),
+      componentType: inputType,
+      metricPath: 'root.input',
+      componentLabel: typeof stream.input['label'] === 'string' ? stream.input['label'] : undefined,
+      config: stream.input,
+    });
+  }
+
+  // --- Processors (recursive expansion) ---
+  const processors = stream.pipeline?.processors ?? [];
+  const chainResult = expandProcessorChain(
+    processors, 'proc', 'root.pipeline.processors', nodes, edges,
+  );
+
+  // Connect input to first processor
+  if (chainResult.entryId && nodes.find((n) => n.id === 'input')) {
+    edges.push({ id: `e-input-${chainResult.entryId}`, source: 'input', target: chainResult.entryId });
+  }
+
+  // --- Output ---
+  if (stream.output) {
+    const outputType = getComponentType(stream.output);
+    const outputId = 'output';
+    nodes.push({
+      id: outputId,
+      type: 'output',
+      label: getLabel(stream.output),
+      componentType: outputType,
+      metricPath: 'root.output',
+      componentLabel: typeof stream.output['label'] === 'string' ? stream.output['label'] : undefined,
+      config: stream.output,
+    });
+
+    // Connect last processor exits (or input) to output
+    const exitIds = chainResult.exitIds.length > 0
+      ? chainResult.exitIds
+      : (nodes.find((n) => n.id === 'input') ? ['input'] : []);
+
+    for (const exitId of exitIds) {
+      edges.push({ id: `e-${exitId}-${outputId}`, source: exitId, target: outputId });
     }
 
-    if (Array.isArray(value)) {
-      for (const item of value) walk(item, undefined, key);
-      return;
-    }
+    extractSubOutputs(stream.output, outputId, 'root.output', nodes, edges);
+  }
 
-    if (typeof value === 'object') {
-      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        walk(v, k, key);
-      }
+  // --- Stream-level Cache Resources ---
+  if (stream.cache_resources) {
+    for (let i = 0; i < stream.cache_resources.length; i++) {
+      const cache = stream.cache_resources[i]!;
+      const cacheLabel = (cache['label'] as string) || getComponentType(cache);
+      const cacheType = getComponentType(cache);
+      const cacheId = `cache-${i}`;
+      nodes.push({
+        id: cacheId,
+        type: 'cache',
+        label: cacheLabel,
+        componentType: cacheType,
+        metricPath: `root.resource.cache.${cacheLabel}`,
+        componentLabel: cacheLabel,
+        config: cache,
+      });
     }
   }
 
-  walk(obj);
-  return { caches, rateLimits };
+  // --- Stream-level Rate Limit Resources ---
+  if (stream.rate_limit_resources) {
+    for (let i = 0; i < stream.rate_limit_resources.length; i++) {
+      const rl = stream.rate_limit_resources[i]!;
+      const rlLabel = (rl['label'] as string) || getComponentType(rl);
+      const rlType = getComponentType(rl);
+      const rlId = `rate-limit-${i}`;
+      nodes.push({
+        id: rlId,
+        type: 'rate_limit',
+        label: rlLabel,
+        componentType: rlType,
+        metricPath: `root.resource.rate_limit.${rlLabel}`,
+        componentLabel: rlLabel,
+        config: rl,
+      });
+    }
+  }
+
+  // --- Add top-level shared resources (prefixed to avoid collisions) ---
+  topLevelCaches.forEach(({ label, node }, idx) => {
+    // Only add if not already present (stream-level resource with same label)
+    if (!nodes.find((n) => n.type === 'cache' && n.label === label)) {
+      nodes.push({ ...node, id: `shared-cache-${idx}` });
+    }
+  });
+  topLevelRateLimits.forEach(({ label, node }, idx) => {
+    if (!nodes.find((n) => n.type === 'rate_limit' && n.label === label)) {
+      nodes.push({ ...node, id: `shared-rl-${idx}` });
+    }
+  });
+
+  connectResources(nodes, edges);
+
+  return { nodes, edges, streamName: stream.name };
+}
+
+// --- Main entry points ---
+
+/**
+ * Parse a Benthos YAML config string into a PipelineGraph of nodes and edges.
+ * @deprecated Use `configToMultiGraph` instead — this is kept for backward compatibility.
+ */
+export function configToGraph(yamlStr: string): PipelineGraph {
+  const config = yaml.load(yamlStr) as BenthosConfig;
+
+  // When streams are defined, return the first stream's graph as the default
+  // to maintain backward compatibility with callers expecting a single PipelineGraph.
+  // Use configToMultiGraph() for full multi-stream support.
+  if (config.streams && config.streams.length > 0) {
+    // Return the first stream's graph as the default
+    const topLevelCaches: Array<{ label: string; node: PipelineNode }> = [];
+    if (config.cache_resources) {
+      for (let i = 0; i < config.cache_resources.length; i++) {
+        const cache = config.cache_resources[i]!;
+        const label = (cache['label'] as string) || getComponentType(cache);
+        const type = getComponentType(cache);
+        topLevelCaches.push({
+          label,
+          node: {
+            id: `cache-${i}`,
+            type: 'cache',
+            label,
+            componentType: type,
+            metricPath: `root.resource.cache.${label}`,
+            componentLabel: label,
+            config: cache,
+          },
+        });
+      }
+    }
+    const topLevelRls: Array<{ label: string; node: PipelineNode }> = [];
+    if (config.rate_limit_resources) {
+      for (let i = 0; i < config.rate_limit_resources.length; i++) {
+        const rl = config.rate_limit_resources[i]!;
+        const label = (rl['label'] as string) || getComponentType(rl);
+        const type = getComponentType(rl);
+        topLevelRls.push({
+          label,
+          node: {
+            id: `rate-limit-${i}`,
+            type: 'rate_limit',
+            label,
+            componentType: type,
+            metricPath: `root.resource.rate_limit.${label}`,
+            componentLabel: label,
+            config: rl,
+          },
+        });
+      }
+    }
+    return buildStreamGraph(config.streams[0]!, topLevelCaches, topLevelRls);
+  }
+
+  // Legacy single-pipeline config
+  return buildStreamGraph(
+    {
+      name: 'default',
+      input: config.input,
+      pipeline: config.pipeline,
+      output: config.output,
+      cache_resources: config.cache_resources,
+      rate_limit_resources: config.rate_limit_resources,
+    },
+    [],
+    [],
+  );
+}
+
+/**
+ * Parse a Benthos YAML config string into a MultiPipelineGraph.
+ * Handles both legacy single-pipeline configs and the new `streams` feature.
+ */
+export function configToMultiGraph(yamlStr: string): MultiPipelineGraph {
+  const config = yaml.load(yamlStr) as BenthosConfig;
+
+  // Collect top-level shared resources
+  const topLevelCaches: Array<{ label: string; node: PipelineNode }> = [];
+  if (config.cache_resources) {
+    for (let i = 0; i < config.cache_resources.length; i++) {
+      const cache = config.cache_resources[i]!;
+      const label = (cache['label'] as string) || getComponentType(cache);
+      const type = getComponentType(cache);
+      topLevelCaches.push({
+        label,
+        node: {
+          id: `cache-${i}`,
+          type: 'cache',
+          label,
+          componentType: type,
+          metricPath: `root.resource.cache.${label}`,
+          componentLabel: label,
+          config: cache,
+        },
+      });
+    }
+  }
+  const topLevelRls: Array<{ label: string; node: PipelineNode }> = [];
+  if (config.rate_limit_resources) {
+    for (let i = 0; i < config.rate_limit_resources.length; i++) {
+      const rl = config.rate_limit_resources[i]!;
+      const label = (rl['label'] as string) || getComponentType(rl);
+      const type = getComponentType(rl);
+      topLevelRls.push({
+        label,
+        node: {
+          id: `rate-limit-${i}`,
+          type: 'rate_limit',
+          label,
+          componentType: type,
+          metricPath: `root.resource.rate_limit.${label}`,
+          componentLabel: label,
+          config: rl,
+        },
+      });
+    }
+  }
+
+  if (config.streams && config.streams.length > 0) {
+    const streams: PipelineStream[] = config.streams.map((stream) => ({
+      name: stream.name,
+      graph: buildStreamGraph(stream, topLevelCaches, topLevelRls),
+    }));
+    return { streams, hasStreams: true };
+  }
+
+  // Legacy single-pipeline config
+  const legacy = buildStreamGraph(
+    {
+      name: 'default',
+      input: config.input,
+      pipeline: config.pipeline,
+      output: config.output,
+      cache_resources: config.cache_resources,
+      rate_limit_resources: config.rate_limit_resources,
+    },
+    [],
+    [],
+  );
+  return { streams: [{ name: legacy.streamName ?? 'default', graph: legacy }], legacy, hasStreams: false };
 }

@@ -64,8 +64,26 @@ export interface PipelineEdge {
   label?: string;
 }
 
-/** Parsed pipeline graph */
+/** Parsed pipeline graph for a single stream */
 export interface PipelineGraph {
   nodes: PipelineNode[];
   edges: PipelineEdge[];
+  /** The stream name this graph belongs to (always set, e.g. 'default' for legacy configs) */
+  streamName: string;
+}
+
+/** A single stream definition from a Benthos config */
+export interface PipelineStream {
+  name: string;
+  graph: PipelineGraph;
+}
+
+/** Parsed pipeline graphs — one per stream, or a single legacy graph */
+export interface MultiPipelineGraph {
+  /** Streams (populated when config has a `streams` top-level key) */
+  streams: PipelineStream[];
+  /** Legacy single-pipeline graph (populated when no `streams` key exists) */
+  legacy?: PipelineGraph;
+  /** Whether this config uses the streams feature */
+  hasStreams: boolean;
 }
