@@ -673,8 +673,9 @@ function buildStreamGraph(
 export function configToGraph(yamlStr: string): PipelineGraph {
   const config = yaml.load(yamlStr) as BenthosConfig;
 
-  // If streams are defined, use the legacy single-pipeline view (input → pipeline → output)
-  // ignoring the streams section. This preserves backward compatibility.
+  // When streams are defined, return the first stream's graph as the default
+  // to maintain backward compatibility with callers expecting a single PipelineGraph.
+  // Use configToMultiGraph() for full multi-stream support.
   if (config.streams && config.streams.length > 0) {
     // Return the first stream's graph as the default
     const topLevelCaches: Array<{ label: string; node: PipelineNode }> = [];

@@ -68,7 +68,7 @@ export interface PipelineEdge {
 export interface PipelineGraph {
   nodes: PipelineNode[];
   edges: PipelineEdge[];
-  /** The stream name this graph belongs to (undefined for legacy single-pipeline configs) */
+  /** The stream name this graph belongs to (always set, e.g. 'default' for legacy configs) */
   streamName?: string;
 }
 

@@ -42,7 +42,7 @@ streams:
         - label: enrich_with_metadata
           log:
             level: DEBUG
-            message: "Processing order ${! json("order_id") } for customer ${! json("customer_id") }"
+            message: 'Processing order ${! json("order_id") } for customer ${! json("customer_id") }'
 
         - label: dedup_orders
           dedupe:
@@ -57,13 +57,13 @@ streams:
             kafka:
               addresses: ["kafka:9092"]
               topic: "orders.pending"
-              key: "${! json("customer_id") }"
+              key: '${! json("customer_id") }'
 
           - label: processed_orders
             kafka:
               addresses: ["kafka:9092"]
               topic: "orders.processed"
-              key: "${! json("order_id") }"
+              key: '${! json("order_id") }'
 
     cache_resources:
       - label: order_cache
@@ -111,7 +111,7 @@ streams:
       kafka:
         addresses: ["kafka:9092"]
         topic: "clickstream.events"
-        key: "${! json("session_id") }"
+        key: '${! json("session_id") }'
 
   # ── Stream 3: Error monitoring pipeline ──────────────────────────
   - name: errors
@@ -139,20 +139,20 @@ streams:
                   - label: critical_alert
                     log:
                       level: ERROR
-                      message: "CRITICAL error from ${! json("service") }: ${! json("error_type") }"
+                      message: 'CRITICAL error from ${! json("service") }: ${! json("error_type") }'
 
               - check: this.severity == "warning"
                 processors:
                   - label: warning_log
                     log:
                       level: WARN
-                      message: "WARNING from ${! json("service") }: ${! json("error_type") }"
+                      message: 'WARNING from ${! json("service") }: ${! json("error_type") }'
 
               - output:
                   label: info_log
                   log:
                     level: INFO
-                    message: "INFO from ${! json("service") }: ${! json("error_type") }"
+                    message: 'INFO from ${! json("service") }: ${! json("error_type") }'
 
     output:
       label: error_sink
@@ -165,8 +165,8 @@ streams:
 
           - label: slack_alerts
             slack:
-              title: "Error Alert: ${! json("severity") }"
-              message: "Service: ${! json("service") } | Type: ${! json("error_type") }"
+              title: 'Error Alert: ${! json("severity") }'
+              message: 'Service: ${! json("service") } | Type: ${! json("error_type") }'
               channel: "#errors"
 
 cache_resources:
