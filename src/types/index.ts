@@ -69,7 +69,7 @@ export interface PipelineGraph {
   nodes: PipelineNode[];
   edges: PipelineEdge[];
   /** The stream name this graph belongs to (always set, e.g. 'default' for legacy configs) */
-  streamName?: string;
+  streamName: string;
 }
 
 /** A single stream definition from a Benthos config */

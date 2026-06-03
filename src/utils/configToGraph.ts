@@ -644,20 +644,18 @@ function buildStreamGraph(
     }
   }
 
-  // --- Add top-level shared resources (prefixed to avoid ID collisions) ---
-  for (const { label, node } of topLevelCaches) {
-    const sharedCacheId = `shared-cache-${label}`;
+  // --- Add top-level shared resources (prefixed to avoid collisions) ---
+  topLevelCaches.forEach(({ label, node }, idx) => {
     // Only add if not already present (stream-level resource with same label)
     if (!nodes.find((n) => n.type === 'cache' && n.label === label)) {
-      nodes.push({ ...node, id: sharedCacheId });
+      nodes.push({ ...node, id: `shared-cache-${idx}` });
     }
-  }
-  for (const { label, node } of topLevelRateLimits) {
-    const sharedRlId = `shared-rl-${label}`;
+  });
+  topLevelRateLimits.forEach(({ label, node }, idx) => {
     if (!nodes.find((n) => n.type === 'rate_limit' && n.label === label)) {
-      nodes.push({ ...node, id: sharedRlId });
+      nodes.push({ ...node, id: `shared-rl-${idx}` });
     }
-  }
+  });
 
   connectResources(nodes, edges);
 

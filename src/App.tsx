@@ -52,9 +52,10 @@ export default function App() {
     return ['default'];
   }, [multiGraph]);
 
-  // Auto-select first stream when target changes
+  // Auto-select first stream only when the target changes,
+  // preserving the user's current selection on refetches.
   useEffect(() => {
-    if (streamNames.length > 0) {
+    if (streamNames.length > 0 && !selectedStream) {
       setSelectedStream(streamNames[0] ?? null);
     }
   }, [selectedTarget, streamNames]); // eslint-disable-line react-hooks/exhaustive-deps
